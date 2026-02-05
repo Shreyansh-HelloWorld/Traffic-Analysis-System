@@ -20,8 +20,9 @@ torch.load = _patched_torch_load
 
 from ultralytics import YOLO
 
-# Use EasyOCR - best balance of accuracy and reliability on Streamlit Cloud
-import easyocr
+# Use PaddleOCR - same as Colab notebook for best accuracy
+os.environ["FLAGS_use_cuda"] = "0"  # Disable CUDA for PaddleOCR
+from paddleocr import PaddleOCR
 
 class ANPRDetector:
     """Automatic Number Plate Recognition Detector"""
@@ -45,11 +46,14 @@ class ANPRDetector:
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         
-        # Initialize EasyOCR with English - optimized for license plates
-        self.ocr = easyocr.Reader(
-            ['en'],
-            gpu=False,
-            verbose=False
+        # Initialize PaddleOCR - same config as Colab notebook
+        self.ocr = PaddleOCR(
+            use_angle_cls=True,
+            lang="en",
+            det=False,      # No detection, just recognition (YOLO handles detection)
+            rec=True,
+            show_log=False,
+            use_gpu=False
         )
     
     def detect_plates(self, image):
@@ -133,33 +137,24 @@ class ANPRDetector:
         return "INVALID"
     
     def _run_ocr(self, image):
-        """Run OCR on image using EasyOCR - simple approach like Colab"""
+        """Run OCR on image using PaddleOCR - same as Colab notebook"""
         try:
-            # EasyOCR works with numpy arrays directly
-            if isinstance(image, np.ndarray):
-                if len(image.shape) == 2:
-                    # Convert grayscale to BGR for EasyOCR
-                    img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-                else:
-                    img = image
-            else:
-                img = np.array(image)
+            # Ensure image is numpy array
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)
             
-            # Simple OCR call - like PaddleOCR in Colab
-            # EasyOCR parameters optimized for license plates
-            results = self.ocr.readtext(
-                img,
-                detail=1,
-                paragraph=False,
-                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',  # Restrict to plate chars
-            )
+            # Convert grayscale to BGR if needed
+            if len(image.shape) == 2:
+                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
             
-            if results:
-                # Combine all detected text (like Colab: "".join([l[1][0] for l in ocr_res[0]]))
-                texts = [text for (bbox, text, conf) in results if conf > 0.1]
+            # Run PaddleOCR - same as Colab: ocr.ocr(crop, cls=True)
+            ocr_result = self.ocr.ocr(image, cls=True)
+            
+            if ocr_result and ocr_result[0]:
+                # Combine all text: "".join([l[1][0] for l in ocr_res[0]])
+                texts = [line[1][0] for line in ocr_result[0] if line[1]]
                 if texts:
-                    combined = "".join(texts)
-                    return combined.upper()
+                    return "".join(texts).upper()
             
         except Exception as e:
             print(f"  -> OCR error: {e}")
