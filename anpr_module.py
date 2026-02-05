@@ -21,10 +21,6 @@ torch.load = _patched_torch_load
 
 from ultralytics import YOLO
 
-# Disable CUDA for PaddleOCR (CPU is more reliable for deployment)
-os.environ["FLAGS_use_cuda"] = "0"
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
 # Detect if running on Mac (for fallback to Tesseract)
 IS_MAC = platform.system() == "Darwin"
 
@@ -32,10 +28,11 @@ IS_MAC = platform.system() == "Darwin"
 if IS_MAC:
     import pytesseract
     from PIL import Image
-    USING_PADDLE = False
+    USING_EASYOCR = False
 else:
-    from paddleocr import PaddleOCR
-    USING_PADDLE = True
+    # Use EasyOCR for Linux/Cloud deployment (more stable than PaddleOCR 3.x)
+    import easyocr
+    USING_EASYOCR = True
 
 class ANPRDetector:
     """Automatic Number Plate Recognition Detector"""
@@ -59,13 +56,9 @@ class ANPRDetector:
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         
-        if USING_PADDLE:
-            # Initialize PaddleOCR with minimal parameters for maximum compatibility
-            self.ocr = PaddleOCR(
-                use_angle_cls=True,
-                lang="en",
-                show_log=False,
-            )
+        if USING_EASYOCR:
+            # Initialize EasyOCR (English only for license plates)
+            self.ocr = easyocr.Reader(['en'], gpu=False, verbose=False)
         else:
             # Tesseract config for Mac fallback
             self.tesseract_config = '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
@@ -243,19 +236,13 @@ class ANPRDetector:
         return sharpened
     
     def _run_ocr(self, image):
-        """Run OCR on image - uses PaddleOCR on Linux, Tesseract on Mac"""
+        """Run OCR on image - uses EasyOCR on Linux, Tesseract on Mac"""
         try:
-            if USING_PADDLE:
-                # PaddleOCR (for Linux/Streamlit Cloud)
-                ocr_res = self.ocr.ocr(image, cls=True)
-                if ocr_res and ocr_res[0]:
-                    texts = []
-                    for line in ocr_res[0]:
-                        if isinstance(line, list) and len(line) >= 2:
-                            if isinstance(line[1], tuple):
-                                texts.append(line[1][0])
-                    if texts:
-                        return "".join(texts)
+            if USING_EASYOCR:
+                # EasyOCR (for Linux/Streamlit Cloud)
+                results = self.ocr.readtext(image, detail=0)
+                if results:
+                    return "".join(results)
             else:
                 # Tesseract (for Mac fallback)
                 if isinstance(image, np.ndarray):
