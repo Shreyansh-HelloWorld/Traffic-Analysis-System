@@ -20,9 +20,8 @@ torch.load = _patched_torch_load
 
 from ultralytics import YOLO
 
-# Use PaddleOCR - same as Colab notebook for best accuracy
-os.environ["FLAGS_use_cuda"] = "0"  # Disable CUDA for PaddleOCR
-from paddleocr import PaddleOCR
+# Use EasyOCR - works on Python 3.13 (Streamlit Cloud)
+import easyocr
 
 class ANPRDetector:
     """Automatic Number Plate Recognition Detector"""
@@ -46,14 +45,11 @@ class ANPRDetector:
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         
-        # Initialize PaddleOCR - same config as Colab notebook
-        self.ocr = PaddleOCR(
-            use_angle_cls=True,
-            lang="en",
-            det=False,      # No detection, just recognition (YOLO handles detection)
-            rec=True,
-            show_log=False,
-            use_gpu=False
+        # Initialize EasyOCR - optimized for license plates
+        self.ocr = easyocr.Reader(
+            ['en'],
+            gpu=False,
+            verbose=False
         )
     
     def detect_plates(self, image):
@@ -137,7 +133,7 @@ class ANPRDetector:
         return "INVALID"
     
     def _run_ocr(self, image):
-        """Run OCR on image using PaddleOCR - same as Colab notebook"""
+        """Run OCR on image using EasyOCR"""
         try:
             # Ensure image is numpy array
             if not isinstance(image, np.ndarray):
@@ -147,12 +143,17 @@ class ANPRDetector:
             if len(image.shape) == 2:
                 image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
             
-            # Run PaddleOCR - same as Colab: ocr.ocr(crop, cls=True)
-            ocr_result = self.ocr.ocr(image, cls=True)
+            # Run EasyOCR with allowlist for plate characters
+            results = self.ocr.readtext(
+                image,
+                detail=1,
+                paragraph=False,
+                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+            )
             
-            if ocr_result and ocr_result[0]:
-                # Combine all text: "".join([l[1][0] for l in ocr_res[0]])
-                texts = [line[1][0] for line in ocr_result[0] if line[1]]
+            if results:
+                # Combine all text like PaddleOCR approach
+                texts = [text for (bbox, text, conf) in results if conf > 0.1]
                 if texts:
                     return "".join(texts).upper()
             

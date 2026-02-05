@@ -11,9 +11,8 @@ opencv-python-headless>=4.6.0
 Pillow>=10.0.0
 numpy>=1.24.0,<2.0.0
 
-# OCR - PaddleOCR (same as Colab notebook)
-paddlepaddle==2.6.2
-paddleocr==2.7.3
+# OCR - EasyOCR (works on Python 3.13)
+easyocr>=1.7.0
 
 # Data handling
 pandas>=2.0.0
