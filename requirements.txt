@@ -11,8 +11,8 @@ opencv-python-headless>=4.6.0
 Pillow>=10.0.0
 numpy>=1.24.0,<2.0.0
 
-# OCR - Tesseract (reliable on all platforms)
-pytesseract>=0.3.10
+# OCR - EasyOCR (best accuracy for license plates)
+easyocr>=1.7.0
 
 # Data handling
 pandas>=2.0.0
