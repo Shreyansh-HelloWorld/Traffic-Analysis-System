@@ -57,8 +57,14 @@ class ANPRDetector:
         self.conf_threshold = conf_threshold
         
         if USING_EASYOCR:
-            # Initialize EasyOCR (English only for license plates)
-            self.ocr = easyocr.Reader(['en'], gpu=False, verbose=False)
+            # Initialize EasyOCR with optimized settings for license plates
+            self.ocr = easyocr.Reader(
+                ['en'],
+                gpu=False,
+                verbose=False,
+                model_storage_directory=None,
+                download_enabled=True
+            )
         else:
             # Tesseract config for Mac fallback
             self.tesseract_config = '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
@@ -109,16 +115,31 @@ class ANPRDetector:
         
         raw = self.clean_plate(raw_text)
         
-        # Special state-code OCR corrections
-        if raw.startswith("XA"):
-            candidate = "KA" + raw[2:]
-            if re.match(r'^KA[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$', candidate):
-                raw = candidate
+        # Common OCR misreads for state codes - try all corrections
+        STATE_CODE_CORRECTIONS = {
+            # O/0 confused with D
+            "OL": "DL", "0L": "DL",  # Delhi
+            "ON": "DN", "0N": "DN",  # Dadra & Nagar Haveli
+            "OD": "OD",              # Odisha (keep as is)
+            # X confused with K
+            "XA": "KA",              # Karnataka
+            "XL": "KL",              # Kerala
+            # I/1 confused with L
+            "DI": "DL", "D1": "DL",  # Delhi
+            "MI": "MH", "M1": "MH",  # Maharashtra
+            # Other common confusions
+            "AH": "MH",              # Maharashtra
+            "HH": "MH",              # Maharashtra
+            "TR": "TR",              # Tripura
+            "T5": "TS",              # Telangana
+            "TS": "TS",              # Telangana
+        }
         
-        if raw.startswith("DI"):
-            candidate = "DL" + raw[2:]
-            if re.match(r'^DL[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$', candidate):
-                raw = candidate
+        # Try state code corrections at the beginning
+        for wrong, correct in STATE_CODE_CORRECTIONS.items():
+            if raw.startswith(wrong):
+                raw = correct + raw[2:]
+                break
         
         # Find valid state code
         for i in range(len(raw) - 1):
@@ -235,14 +256,54 @@ class ANPRDetector:
         sharpened = cv2.filter2D(denoised, -1, kernel)
         return sharpened
     
+    @staticmethod
+    def preprocess_v6(crop):
+        """Best for Indian plates: Upscale + CLAHE + Otsu threshold"""
+        # Upscale for better character recognition
+        upscaled = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+        # CLAHE for better contrast
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        # Otsu's thresholding
+        _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return thresh
+    
+    @staticmethod
+    def normalize_ocr_text(text):
+        """Normalize common OCR character confusions"""
+        if not text:
+            return text
+        # Common lowercase to uppercase confusions
+        replacements = {
+            'o': 'O', 'l': 'L', 'i': 'I', 's': 'S', 'z': 'Z',
+            'b': 'B', 'g': 'G', 'q': 'Q', 'd': 'D', 'a': 'A',
+            'e': 'E', 'r': 'R', 't': 'T', 'n': 'N', 'm': 'M',
+            'h': 'H', 'k': 'K', 'p': 'P', 'u': 'U', 'v': 'V',
+            'w': 'W', 'x': 'X', 'y': 'Y', 'c': 'C', 'f': 'F', 'j': 'J',
+        }
+        result = text.upper()
+        # Remove spaces and special chars except alphanumeric
+        result = ''.join(c for c in result if c.isalnum())
+        return result
+    
     def _run_ocr(self, image):
         """Run OCR on image - uses EasyOCR on Linux, Tesseract on Mac"""
         try:
             if USING_EASYOCR:
-                # EasyOCR (for Linux/Streamlit Cloud)
-                results = self.ocr.readtext(image, detail=0)
+                # EasyOCR with optimized settings for license plates
+                results = self.ocr.readtext(
+                    image,
+                    detail=0,
+                    paragraph=False,
+                    allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+                    batch_size=1,
+                    contrast_ths=0.1,
+                    adjust_contrast=0.5,
+                )
                 if results:
-                    return "".join(results)
+                    text = "".join(results)
+                    return self.normalize_ocr_text(text)
             else:
                 # Tesseract (for Mac fallback)
                 if isinstance(image, np.ndarray):
@@ -253,7 +314,7 @@ class ANPRDetector:
                 else:
                     pil_image = image
                 text = pytesseract.image_to_string(pil_image, config=self.tesseract_config)
-                return text.strip() if text.strip() else None
+                return self.normalize_ocr_text(text) if text.strip() else None
         except Exception as e:
             print(f"  -> OCR error: {e}")
         return None
@@ -291,9 +352,10 @@ class ANPRDetector:
         
         # Try preprocessing methods for better accuracy
         preprocessing_methods = [
+            ("Otsu", self.preprocess_v6),           # Best for Indian plates
             ("CLAHE", self.preprocess_v1),          # Best for low contrast
-            ("Threshold", self.preprocess_v2),      # Best for noisy images
             ("Upscale", self.preprocess_v3),        # Best for small plates
+            ("Threshold", self.preprocess_v2),      # Best for noisy images
             ("Morphology", self.preprocess_v4),     # Best for broken characters
         ]
         
