@@ -212,11 +212,12 @@ class ANPRDetector:
     
     @staticmethod
     def preprocess_v3(crop):
-        """Upscale + Grayscale + Contrast Enhancement"""
-        upscaled = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        """Upscale 4x + Grayscale + Contrast Enhancement"""
+        # More aggressive upscaling for small plates
+        upscaled = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
         gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
-        alpha = 1.5  # Contrast
-        beta = 0     # Brightness
+        alpha = 1.8  # Higher contrast
+        beta = 10    # Slight brightness boost
         enhanced = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
         return enhanced
     
@@ -241,14 +242,46 @@ class ANPRDetector:
     
     @staticmethod
     def preprocess_v6(crop):
-        """Best for Indian plates: Upscale + CLAHE + Otsu threshold"""
-        # Upscale for better character recognition
-        upscaled = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        """Best for Indian plates: Aggressive Upscale + CLAHE + Otsu threshold"""
+        # Very aggressive upscaling for better character recognition
+        upscaled = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
         gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
         # CLAHE for better contrast
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
         # Otsu's thresholding
+        _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return thresh
+    
+    @staticmethod
+    def preprocess_v7(crop):
+        """Add padding + Upscale + High contrast for edge plates"""
+        # Add white padding around the image (helps OCR detect edge characters)
+        padding = 20
+        padded = cv2.copyMakeBorder(crop, padding, padding, padding, padding, 
+                                     cv2.BORDER_CONSTANT, value=[255, 255, 255])
+        # Upscale aggressively
+        upscaled = cv2.resize(padded, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+        # High contrast
+        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        # Bilateral filter to reduce noise while keeping edges
+        denoised = cv2.bilateralFilter(enhanced, 11, 75, 75)
+        return denoised
+    
+    @staticmethod
+    def preprocess_v8(crop):
+        """Invert colors for white-on-black plates"""
+        upscaled = cv2.resize(crop, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+        # Check if plate is dark (white text on black)
+        mean_val = np.mean(gray)
+        if mean_val < 127:
+            # Invert for white-on-black plates
+            gray = cv2.bitwise_not(gray)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
         _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         return thresh
     
@@ -270,7 +303,7 @@ class ANPRDetector:
         result = ''.join(c for c in result if c.isalnum())
         return result
     
-    def _run_ocr(self, image):
+    def _run_ocr(self, image, allowlist=None):
         """Run OCR on image using EasyOCR"""
         try:
             # EasyOCR works with numpy arrays directly
@@ -283,27 +316,39 @@ class ANPRDetector:
             else:
                 img = np.array(image)
             
-            # Run EasyOCR with optimized settings for license plates
-            results = self.ocr.readtext(
-                img,
-                detail=1,  # Get confidence scores
-                paragraph=False,
-                min_size=10,
-                text_threshold=0.5,
-                low_text=0.3,
-                contrast_ths=0.1,
-                adjust_contrast=0.5,
-            )
+            # Build OCR parameters
+            ocr_params = {
+                'detail': 1,  # Get confidence scores
+                'paragraph': False,
+                'min_size': 5,
+                'text_threshold': 0.3,  # Lower threshold for more detections
+                'low_text': 0.2,
+                'link_threshold': 0.3,
+                'contrast_ths': 0.05,  # Very low contrast threshold
+                'adjust_contrast': 0.8,
+                'width_ths': 0.5,
+                'decoder': 'beamsearch',  # Better decoder
+                'beamWidth': 10,
+            }
+            
+            # Add allowlist if specified (restrict to plate characters)
+            if allowlist:
+                ocr_params['allowlist'] = allowlist
+            
+            # Run EasyOCR
+            results = self.ocr.readtext(img, **ocr_params)
             
             if results:
                 # Sort by confidence and get all text
                 texts = []
                 for (bbox, text, conf) in results:
-                    if conf > 0.1:  # Only include if confidence > 10%
-                        texts.append(text)
+                    if conf > 0.05:  # Very low threshold - we'll filter later
+                        texts.append((text, conf))
                 
                 if texts:
-                    combined = "".join(texts)
+                    # Sort by confidence descending
+                    texts.sort(key=lambda x: x[1], reverse=True)
+                    combined = "".join([t[0] for t in texts])
                     return self.normalize_ocr_text(combined)
             
         except Exception as e:
@@ -329,34 +374,38 @@ class ANPRDetector:
         
         results = []
         
-        # Try original image first
-        print("  -> Running OCR on original image...")
-        raw_text = self._run_ocr(crop)
-        if raw_text:
-            print(f"  -> OCR result: {raw_text}")
-            final_plate = self.smart_post_process(raw_text)
-            if final_plate not in ["INVALID", "UNREADABLE"]:
-                return (raw_text, final_plate)  # Early exit on valid plate
-            results.append((raw_text, final_plate))
-        else:
-            print("  -> OCR returned no result")
+        # Allowlist for Indian license plates (letters + digits)
+        plate_allowlist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
         
-        # Try preprocessing methods for better accuracy
+        # Try preprocessing methods for better accuracy (prioritized order)
         preprocessing_methods = [
-            ("Otsu", self.preprocess_v6),           # Best for Indian plates
-            ("CLAHE", self.preprocess_v1),          # Best for low contrast
-            ("Upscale", self.preprocess_v3),        # Best for small plates
-            ("Threshold", self.preprocess_v2),      # Best for noisy images
-            ("Morphology", self.preprocess_v4),     # Best for broken characters
+            ("Padded", self.preprocess_v7),        # Best for edge characters
+            ("Otsu4x", self.preprocess_v6),        # Best for Indian plates with 4x upscale
+            ("Upscale4x", self.preprocess_v3),     # Best for small plates
+            ("Invert", self.preprocess_v8),        # Best for white-on-black plates
+            ("CLAHE", self.preprocess_v1),         # Best for low contrast
+            ("Morphology", self.preprocess_v4),    # Best for broken characters
+            ("Threshold", self.preprocess_v2),     # Best for noisy images
         ]
         
         for name, preprocess_func in preprocessing_methods:
             try:
                 print(f"  -> Trying {name} preprocessing...")
                 processed = preprocess_func(crop)
-                raw_text = self._run_ocr(processed)
+                
+                # Try with allowlist first (restricted to plate characters)
+                raw_text = self._run_ocr(processed, allowlist=plate_allowlist)
                 if raw_text:
-                    print(f"  -> OCR result: {raw_text}")
+                    print(f"  -> OCR result (with allowlist): {raw_text}")
+                    final_plate = self.smart_post_process(raw_text)
+                    if final_plate not in ["INVALID", "UNREADABLE"]:
+                        return (raw_text, final_plate)  # Early exit on valid plate
+                    results.append((raw_text, final_plate))
+                
+                # Try without allowlist (might catch more characters)
+                raw_text = self._run_ocr(processed, allowlist=None)
+                if raw_text:
+                    print(f"  -> OCR result (no allowlist): {raw_text}")
                     final_plate = self.smart_post_process(raw_text)
                     if final_plate not in ["INVALID", "UNREADABLE"]:
                         return (raw_text, final_plate)  # Early exit on valid plate
@@ -366,6 +415,17 @@ class ANPRDetector:
             except Exception as e:
                 print(f"  -> {name} preprocessing failed: {e}")
                 continue
+        
+        # Also try original image as last resort
+        print("  -> Trying original image...")
+        for allowlist in [plate_allowlist, None]:
+            raw_text = self._run_ocr(crop, allowlist=allowlist)
+            if raw_text:
+                print(f"  -> Original OCR result: {raw_text}")
+                final_plate = self.smart_post_process(raw_text)
+                if final_plate not in ["INVALID", "UNREADABLE"]:
+                    return (raw_text, final_plate)
+                results.append((raw_text, final_plate))
         
         # If no valid plate found, return best raw result
         if results:
