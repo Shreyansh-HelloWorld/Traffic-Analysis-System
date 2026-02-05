@@ -28,11 +28,11 @@ IS_MAC = platform.system() == "Darwin"
 if IS_MAC:
     import pytesseract
     from PIL import Image
-    USING_EASYOCR = False
+    USING_PADDLE = False
 else:
-    # Use EasyOCR for Linux/Cloud deployment (more stable than PaddleOCR 3.x)
-    import easyocr
-    USING_EASYOCR = True
+    # Use PaddleOCR 3.x for Linux/Cloud deployment
+    from paddleocr import PaddleOCR
+    USING_PADDLE = True
 
 class ANPRDetector:
     """Automatic Number Plate Recognition Detector"""
@@ -56,14 +56,12 @@ class ANPRDetector:
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         
-        if USING_EASYOCR:
-            # Initialize EasyOCR with optimized settings for license plates
-            self.ocr = easyocr.Reader(
-                ['en'],
-                gpu=False,
-                verbose=False,
-                model_storage_directory=None,
-                download_enabled=True
+        if USING_PADDLE:
+            # Initialize PaddleOCR 3.x with settings optimized for license plates
+            self.ocr = PaddleOCR(
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
             )
         else:
             # Tesseract config for Mac fallback
@@ -288,22 +286,37 @@ class ANPRDetector:
         return result
     
     def _run_ocr(self, image):
-        """Run OCR on image - uses EasyOCR on Linux, Tesseract on Mac"""
+        """Run OCR on image - uses PaddleOCR on Linux, Tesseract on Mac"""
         try:
-            if USING_EASYOCR:
-                # EasyOCR with optimized settings for license plates
-                results = self.ocr.readtext(
-                    image,
-                    detail=0,
-                    paragraph=False,
-                    allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-                    batch_size=1,
-                    contrast_ths=0.1,
-                    adjust_contrast=0.5,
-                )
-                if results:
-                    text = "".join(results)
-                    return self.normalize_ocr_text(text)
+            if USING_PADDLE:
+                # PaddleOCR 3.x API uses predict() method
+                # Save image temporarily for PaddleOCR
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                    temp_path = f.name
+                    cv2.imwrite(temp_path, image)
+                
+                try:
+                    result = self.ocr.predict(input=temp_path)
+                    # Parse PaddleOCR 3.x result format
+                    texts = []
+                    if result and len(result) > 0:
+                        for item in result:
+                            if hasattr(item, 'rec_texts'):
+                                texts.extend(item.rec_texts)
+                            elif isinstance(item, dict) and 'rec_texts' in item:
+                                texts.extend(item['rec_texts'])
+                            elif isinstance(item, list):
+                                for sub_item in item:
+                                    if isinstance(sub_item, dict) and 'rec_texts' in sub_item:
+                                        texts.extend(sub_item['rec_texts'])
+                    if texts:
+                        return self.normalize_ocr_text("".join(texts))
+                finally:
+                    # Clean up temp file
+                    import os
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
             else:
                 # Tesseract (for Mac fallback)
                 if isinstance(image, np.ndarray):

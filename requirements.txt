@@ -11,8 +11,8 @@ opencv-python-headless>=4.6.0
 Pillow>=10.0.0
 numpy>=1.24.0,<2.0.0
 
-# OCR - EasyOCR for Linux/Streamlit Cloud (stable API)
-easyocr>=1.7.0
+# OCR - PaddleOCR 3.x for Linux/Streamlit Cloud
+paddleocr>=3.0.0
 
 # Data handling
 pandas>=2.0.0
