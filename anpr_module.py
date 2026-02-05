@@ -21,18 +21,9 @@ torch.load = _patched_torch_load
 
 from ultralytics import YOLO
 
-# Detect if running on Mac (for fallback to Tesseract)
-IS_MAC = platform.system() == "Darwin"
-
-# Import OCR based on platform
-if IS_MAC:
-    import pytesseract
-    from PIL import Image
-    USING_PADDLE = False
-else:
-    # Use PaddleOCR 3.x for Linux/Cloud deployment
-    from paddleocr import PaddleOCR
-    USING_PADDLE = True
+# Use Tesseract OCR for all platforms (more reliable on Streamlit Cloud)
+import pytesseract
+from PIL import Image
 
 class ANPRDetector:
     """Automatic Number Plate Recognition Detector"""
@@ -56,16 +47,15 @@ class ANPRDetector:
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         
-        if USING_PADDLE:
-            # Initialize PaddleOCR 3.x with settings optimized for license plates
-            self.ocr = PaddleOCR(
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=False,
-            )
-        else:
-            # Tesseract config for Mac fallback
-            self.tesseract_config = '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        # Tesseract config optimized for Indian license plates
+        # PSM 7 = single text line, PSM 8 = single word
+        # Using multiple configs to try different approaches
+        self.tesseract_configs = [
+            '--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+            '--oem 3 --psm 8 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+            '--oem 3 --psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+        ]
+        self.tesseract_config = self.tesseract_configs[0]
     
     def detect_plates(self, image):
         """
@@ -285,45 +275,37 @@ class ANPRDetector:
         result = ''.join(c for c in result if c.isalnum())
         return result
     
-    def _run_ocr(self, image):
-        """Run OCR on image - uses PaddleOCR on Linux, Tesseract on Mac"""
+    def _run_ocr(self, image, config_idx=0):
+        """Run OCR on image using Tesseract"""
         try:
-            if USING_PADDLE:
-                # PaddleOCR 3.x API
-                # Save image temporarily for PaddleOCR
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                    temp_path = f.name
-                    cv2.imwrite(temp_path, image)
-                
-                try:
-                    result = self.ocr.predict(input=temp_path)
-                    # Parse PaddleOCR 3.x result format - rec_texts contains recognized text
-                    texts = []
-                    if result:
-                        for res in result:
-                            # res.rec_texts is a list of recognized texts
-                            if hasattr(res, 'rec_texts') and res.rec_texts:
-                                texts.extend(res.rec_texts)
-                    if texts:
-                        return self.normalize_ocr_text("".join(texts))
-                finally:
-                    # Clean up temp file
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-            else:
-                # Tesseract (for Mac fallback)
-                if isinstance(image, np.ndarray):
-                    if len(image.shape) == 2:
-                        pil_image = Image.fromarray(image)
-                    else:
-                        pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            # Convert image to PIL format
+            if isinstance(image, np.ndarray):
+                if len(image.shape) == 2:
+                    pil_image = Image.fromarray(image)
                 else:
-                    pil_image = image
-                text = pytesseract.image_to_string(pil_image, config=self.tesseract_config)
-                return self.normalize_ocr_text(text) if text.strip() else None
+                    pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            else:
+                pil_image = image
+            
+            # Use specified Tesseract config
+            config = self.tesseract_configs[config_idx] if config_idx < len(self.tesseract_configs) else self.tesseract_config
+            text = pytesseract.image_to_string(pil_image, config=config)
+            return self.normalize_ocr_text(text) if text.strip() else None
         except Exception as e:
             print(f"  -> OCR error: {e}")
+        return None
+    
+    def _run_ocr_all_configs(self, image):
+        """Try OCR with all Tesseract configs and return the best result"""
+        results = []
+        for idx in range(len(self.tesseract_configs)):
+            text = self._run_ocr(image, config_idx=idx)
+            if text:
+                results.append(text)
+        
+        # Return the result with most alphanumeric characters
+        if results:
+            return max(results, key=lambda x: len(self.clean_plate(x)))
         return None
     
     def perform_ocr(self, crop):
@@ -345,9 +327,9 @@ class ANPRDetector:
         
         results = []
         
-        # Try original image first
+        # Try original image first with all configs
         print("  -> Running OCR on original image...")
-        raw_text = self._run_ocr(crop)
+        raw_text = self._run_ocr_all_configs(crop)
         if raw_text:
             print(f"  -> OCR result: {raw_text}")
             final_plate = self.smart_post_process(raw_text)
@@ -370,7 +352,7 @@ class ANPRDetector:
             try:
                 print(f"  -> Trying {name} preprocessing...")
                 processed = preprocess_func(crop)
-                raw_text = self._run_ocr(processed)
+                raw_text = self._run_ocr_all_configs(processed)
                 if raw_text:
                     print(f"  -> OCR result: {raw_text}")
                     final_plate = self.smart_post_process(raw_text)
