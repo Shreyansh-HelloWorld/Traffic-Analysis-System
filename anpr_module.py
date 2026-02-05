@@ -67,14 +67,10 @@ class ANPRDetector:
                 lang="en",
                 det=True,           # Enable text detection
                 rec=True,           # Enable text recognition
-                cls=True,           # Enable angle classification
                 show_log=False,
                 use_gpu=False,
                 enable_mkldnn=True, # CPU optimization
                 cpu_threads=4,      # Use multiple threads
-                det_db_thresh=0.3,  # Detection threshold
-                det_db_box_thresh=0.5,
-                rec_batch_num=6,    # Batch size for recognition
             )
         else:
             # Tesseract config for Mac fallback
