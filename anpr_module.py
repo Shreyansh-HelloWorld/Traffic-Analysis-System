@@ -60,17 +60,11 @@ class ANPRDetector:
         self.conf_threshold = conf_threshold
         
         if USING_PADDLE:
-            # Initialize PaddleOCR with optimal settings for license plates
-            # Using PP-OCRv4 for best accuracy
+            # Initialize PaddleOCR with minimal parameters for maximum compatibility
             self.ocr = PaddleOCR(
                 use_angle_cls=True,
                 lang="en",
-                det=True,           # Enable text detection
-                rec=True,           # Enable text recognition
                 show_log=False,
-                use_gpu=False,
-                enable_mkldnn=True, # CPU optimization
-                cpu_threads=4,      # Use multiple threads
             )
         else:
             # Tesseract config for Mac fallback
