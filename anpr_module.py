@@ -289,7 +289,7 @@ class ANPRDetector:
         """Run OCR on image - uses PaddleOCR on Linux, Tesseract on Mac"""
         try:
             if USING_PADDLE:
-                # PaddleOCR 3.x API uses predict() method
+                # PaddleOCR 3.x API
                 # Save image temporarily for PaddleOCR
                 import tempfile
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
@@ -298,23 +298,17 @@ class ANPRDetector:
                 
                 try:
                     result = self.ocr.predict(input=temp_path)
-                    # Parse PaddleOCR 3.x result format
+                    # Parse PaddleOCR 3.x result format - rec_texts contains recognized text
                     texts = []
-                    if result and len(result) > 0:
-                        for item in result:
-                            if hasattr(item, 'rec_texts'):
-                                texts.extend(item.rec_texts)
-                            elif isinstance(item, dict) and 'rec_texts' in item:
-                                texts.extend(item['rec_texts'])
-                            elif isinstance(item, list):
-                                for sub_item in item:
-                                    if isinstance(sub_item, dict) and 'rec_texts' in sub_item:
-                                        texts.extend(sub_item['rec_texts'])
+                    if result:
+                        for res in result:
+                            # res.rec_texts is a list of recognized texts
+                            if hasattr(res, 'rec_texts') and res.rec_texts:
+                                texts.extend(res.rec_texts)
                     if texts:
                         return self.normalize_ocr_text("".join(texts))
                 finally:
                     # Clean up temp file
-                    import os
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
             else:
