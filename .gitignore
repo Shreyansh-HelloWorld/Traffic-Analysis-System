@@ -43,3 +43,4 @@ results/
 # Large files (models should be tracked with Git LFS or downloaded)
 # Uncomment below if not using Git LFS
 # models/*.pt
+anpr_video_testing_(3).py
