@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import re
+import os
 import warnings
 import torch
 from ultralytics.nn.tasks import DetectionModel
@@ -24,7 +25,10 @@ def _patched_torch_load(*args, **kwargs):
 torch.load = _patched_torch_load
 
 from ultralytics import YOLO
-import easyocr
+
+# Disable CUDA for PaddleOCR on CPU environments
+os.environ["FLAGS_use_cuda"] = "0"
+from paddleocr import PaddleOCR
 
 class ANPRDetector:
     """Automatic Number Plate Recognition Detector"""
@@ -48,11 +52,14 @@ class ANPRDetector:
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         
-        # Initialize EasyOCR (works on Python 3.13 / Streamlit Cloud)
-        self.ocr = easyocr.Reader(
-            ['en'],
-            gpu=False,
-            verbose=False
+        # Initialize PaddleOCR
+        self.ocr = PaddleOCR(
+            use_angle_cls=True,
+            lang="en",
+            det=False,
+            rec=True,
+            show_log=False,
+            use_gpu=False
         )
     
     def detect_plates(self, image):
@@ -221,32 +228,10 @@ class ANPRDetector:
         sharpened = cv2.filter2D(denoised, -1, kernel)
         return sharpened
     
-    def _run_ocr(self, image):
-        """Run EasyOCR on an image and return combined text or None"""
-        try:
-            if not isinstance(image, np.ndarray):
-                image = np.array(image)
-            if len(image.shape) == 2:
-                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            
-            ocr_results = self.ocr.readtext(
-                image,
-                detail=1,
-                paragraph=False,
-                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            )
-            if ocr_results:
-                texts = [text for (_, text, conf) in ocr_results if conf > 0.1]
-                if texts:
-                    return "".join(texts).upper()
-        except Exception:
-            pass
-        return None
-    
     def perform_ocr(self, crop):
         """
         Perform OCR with multiple preprocessing methods
-        Uses EasyOCR + full post-processing for best accuracy
+        Uses PaddleOCR + full post-processing for best accuracy
         
         Args:
             crop: Cropped plate image
@@ -256,18 +241,18 @@ class ANPRDetector:
         """
         if crop is None or crop.size == 0:
             return "UNREADABLE", "UNREADABLE"
-        if crop.shape[0] < 10 or crop.shape[1] < 10:
-            return "UNREADABLE", "UNREADABLE"
         
         results = []
         
         # Try original image first
-        raw_text = self._run_ocr(crop)
-        if raw_text:
-            final_plate = self.smart_post_process(raw_text)
-            results.append((raw_text, final_plate))
-            if final_plate not in ["INVALID", "UNREADABLE"]:
-                return (raw_text, final_plate)
+        try:
+            ocr_res = self.ocr.ocr(crop, cls=True)
+            if ocr_res and ocr_res[0]:
+                raw_text = "".join([l[1][0] for l in ocr_res[0]])
+                final_plate = self.smart_post_process(raw_text)
+                results.append((raw_text, final_plate))
+        except:
+            pass
         
         # Try all 5 preprocessing methods
         preprocessing_methods = [
@@ -281,20 +266,23 @@ class ANPRDetector:
         for preprocess_func in preprocessing_methods:
             try:
                 processed = preprocess_func(crop)
-                raw_text = self._run_ocr(processed)
-                if raw_text:
+                ocr_res = self.ocr.ocr(processed, cls=True)
+                if ocr_res and ocr_res[0]:
+                    raw_text = "".join([l[1][0] for l in ocr_res[0]])
                     final_plate = self.smart_post_process(raw_text)
                     results.append((raw_text, final_plate))
-                    if final_plate not in ["INVALID", "UNREADABLE"]:
-                        return (raw_text, final_plate)
-            except Exception:
+            except:
                 continue
         
-        # No valid plate found — return best raw result
-        if results:
-            non_unreadable = [r for r in results if r[0] and r[0] != "UNREADABLE"]
+        # Find the best result (prioritize valid plates)
+        valid_results = [r for r in results if r[1] not in ["INVALID", "UNREADABLE"]]
+        
+        if valid_results:
+            return valid_results[0]
+        elif results:
+            non_unreadable = [r for r in results if r[0] != "UNREADABLE"]
             if non_unreadable:
-                return max(non_unreadable, key=lambda x: len(self.clean_plate(x[0])))
+                return max(non_unreadable, key=lambda x: len(x[0]))
             return results[0]
         
         return "UNREADABLE", "UNREADABLE"

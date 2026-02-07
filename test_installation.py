@@ -19,7 +19,8 @@ def test_imports():
         'pandas': 'Pandas',
         'PIL': 'Pillow',
         'ultralytics': 'Ultralytics (YOLO)',
-        'easyocr': 'EasyOCR',
+        'paddleocr': 'PaddleOCR',
+        'paddle': 'PaddlePaddle'
     }
     
     failed = []
@@ -83,8 +84,8 @@ def test_versions():
         pass
     
     try:
-        import easyocr
-        print(f"EasyOCR: {easyocr.__version__}")
+        import paddle
+        print(f"PaddlePaddle: {paddle.__version__}")
     except:
         pass
     
