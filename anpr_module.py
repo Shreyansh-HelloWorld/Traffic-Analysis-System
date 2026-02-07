@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import re
+import os
 import warnings
 import torch
 from ultralytics.nn.tasks import DetectionModel
@@ -21,7 +22,9 @@ def _patched_torch_load(*args, **kwargs):
 torch.load = _patched_torch_load
 
 from ultralytics import YOLO
-import easyocr
+
+os.environ["FLAGS_use_cuda"] = "0"
+from paddleocr import PaddleOCR
 
 class ANPRDetector:
     """Automatic Number Plate Recognition Detector"""
@@ -45,8 +48,15 @@ class ANPRDetector:
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         
-        # Initialize EasyOCR
-        self.ocr = easyocr.Reader(['en'], gpu=False, verbose=False)
+        # Initialize PaddleOCR
+        self.ocr = PaddleOCR(
+            use_angle_cls=True,
+            lang="en",
+            det=False,
+            rec=True,
+            show_log=False,
+            use_gpu=False
+        )
     
     def detect_plates(self, image):
         """
@@ -214,63 +224,47 @@ class ANPRDetector:
         sharpened = cv2.filter2D(denoised, -1, kernel)
         return sharpened
     
-    def _run_ocr(self, image):
-        """Run EasyOCR on an image and return raw text or None"""
-        try:
-            if not isinstance(image, np.ndarray):
-                image = np.array(image)
-            if len(image.shape) == 2:
-                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            results = self.ocr.readtext(
-                image, detail=1, paragraph=False,
-                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            )
-            if results:
-                texts = [t for (_, t, c) in results if c > 0.1]
-                if texts:
-                    return "".join(texts).upper()
-        except Exception:
-            pass
-        return None
-
     def perform_ocr(self, crop):
         """
         Perform OCR with multiple preprocessing methods.
-        Uses EasyOCR + full post-processing for best accuracy.
+        Uses PaddleOCR + full post-processing for best accuracy.
         """
         if crop is None or crop.size == 0:
-            return "UNREADABLE", "UNREADABLE"
-        if crop.shape[0] < 10 or crop.shape[1] < 10:
             return "UNREADABLE", "UNREADABLE"
         
         results = []
         
         # Try original image first
-        raw = self._run_ocr(crop)
-        if raw:
-            plate = self.smart_post_process(raw)
-            results.append((raw, plate))
-            if plate not in ["INVALID", "UNREADABLE"]:
-                return (raw, plate)
+        try:
+            ocr_res = self.ocr.ocr(crop, cls=True)
+            if ocr_res and ocr_res[0]:
+                raw_text = "".join([l[1][0] for l in ocr_res[0]])
+                plate = self.smart_post_process(raw_text)
+                results.append((raw_text, plate))
+        except:
+            pass
         
         # Try all 5 preprocessing methods
         for fn in [self.preprocess_v1, self.preprocess_v2, self.preprocess_v3,
                    self.preprocess_v4, self.preprocess_v5]:
             try:
                 processed = fn(crop)
-                raw = self._run_ocr(processed)
-                if raw:
-                    plate = self.smart_post_process(raw)
-                    results.append((raw, plate))
-                    if plate not in ["INVALID", "UNREADABLE"]:
-                        return (raw, plate)
-            except Exception:
+                ocr_res = self.ocr.ocr(processed, cls=True)
+                if ocr_res and ocr_res[0]:
+                    raw_text = "".join([l[1][0] for l in ocr_res[0]])
+                    plate = self.smart_post_process(raw_text)
+                    results.append((raw_text, plate))
+            except:
                 continue
         
-        if results:
-            non_unreadable = [r for r in results if r[0]]
-            if non_unreadable:
-                return max(non_unreadable, key=lambda x: len(self.clean_plate(x[0])))
+        # Prioritize valid plates
+        valid = [r for r in results if r[1] not in ["INVALID", "UNREADABLE"]]
+        if valid:
+            return valid[0]
+        elif results:
+            non_empty = [r for r in results if r[0]]
+            if non_empty:
+                return max(non_empty, key=lambda x: len(x[0]))
             return results[0]
         
         return "UNREADABLE", "UNREADABLE"
