@@ -1,14 +1,15 @@
 # 🚦 Intelligent Traffic Analysis System
 
-Complete ANPR (Automatic Number Plate Recognition) + Vehicle Classification system with Streamlit deployment.
+Complete ANPR (Automatic Number Plate Recognition) + Vehicle Classification system with Streamlit deployment. Supports both **image and video** analysis.
 
 ## 📋 Features
 
 - **Vehicle Detection & Classification**: Detects and classifies vehicles into 2W, 3W, 4W, and HMV
-- **Number Plate Detection**: Locates vehicle number plates in images
-- **OCR with Smart Post-Processing**: Reads and validates Indian vehicle number plates
+- **Number Plate Detection**: Locates vehicle number plates in images and videos
+- **OCR with Smart Post-Processing**: Reads and validates Indian vehicle number plates with research-backed corrections
 - **Multi-Method Preprocessing**: Uses 5 different preprocessing techniques for better accuracy
-- **Interactive Web Interface**: User-friendly Streamlit interface
+- **🎬 Video Analysis**: Frame-by-frame processing with automatic plate deduplication
+- **Interactive Web Interface**: User-friendly Streamlit interface with Image / Video mode toggle
 - **Detailed Results**: View results in gallery, table, or export formats
 - **Real-time Statistics**: Get instant insights about detected vehicles
 
@@ -115,14 +116,28 @@ Press `Ctrl+C` in the terminal to stop the server.
 
 ## 📖 How to Use
 
-1. **Upload Image**: Click "Browse files" and select a traffic image
-2. **Adjust Settings** (Optional): Use the sidebar to adjust detection confidence thresholds
-3. **Analyze**: Click "🔍 Analyze Traffic" button
-4. **View Results**: 
+### 📷 Image Analysis
+1. **Select Mode**: Choose "📷 Image Analysis" at the top
+2. **Upload Image**: Click "Browse files" and select a traffic image
+3. **Adjust Settings** (Optional): Use the sidebar to adjust detection confidence thresholds
+4. **Analyze**: Click "🔍 Analyze Traffic" button
+5. **View Results**: 
    - See annotated image with detected vehicles and plates
    - Browse gallery view for detailed information
    - Check table view for structured data
    - Export results as CSV or JSON
+
+### 🎬 Video Analysis
+1. **Select Mode**: Choose "🎬 Video Analysis" at the top
+2. **Upload Video**: Click "Browse files" and select a traffic video (MP4, AVI, MOV, MKV)
+3. **Frame Skip**: Adjust the "Process every Nth frame" slider (lower = more thorough but slower)
+4. **Analyze**: Click "🎬 Analyze Video" button
+5. **View Results**:
+   - Video metadata (duration, FPS, resolution)
+   - Sample annotated frames from the video
+   - Deduplicated list of all unique plates found
+   - Frame number and timestamp for each detection
+   - Gallery, table, and export views
 
 ## 🛠️ Troubleshooting
 
@@ -206,16 +221,26 @@ vehicle_classifier = VehicleClassifier("path/to/your/vehicle_model.pt")
 ## 🇮🇳 Supported Plate Formats
 
 - **Standard Format**: `SS00X0000` to `SS00XXX0000`
-  - SS = State code (2 letters)
-  - 00 = RTO code (1-2 digits)
-  - X = Series (1-3 letters)
-  - 0000 = Registration number (4 digits)
+  - SS = State code (2 letters — 37 current + 4 legacy codes)
+  - 00 = RTO code (1-2 digits; Delhi allows single-digit)
+  - X = Series (0-3 letters; O and I are prohibited by regulation)
+  - 0000 = Registration number (1-4 digits)
 
 - **Bharat Series**: `YYBHXXXXAA`
-  - YY = Year (2 digits)
-  - BH = Bharat indicator
-  - XXXX = Registration number (4 digits)
-  - AA = Random letters (2 letters)
+  - YY = Year of registration (2 digits)
+  - BH = Bharat indicator (national portability)
+  - XXXX = Registration number (1-4 digits)
+  - AA = Series letters (1-2 letters)
+
+- **Legacy State Codes**: TS (Telangana → TG), OR (Orissa → OD), DN (→ DD), UA (→ UK) — all still accepted
+
+### OCR Post-Processing Highlights
+
+- **Smart state-code recovery**: Automatically fixes common OCR misreads (e.g., XA→KA, DI→DL, 6J→GJ, 8R→BR)
+- **Digit/letter confusion maps**: Handles O↔0, I↔1, B↔8, S↔5, G↔6, Z↔2, A↔4, T↔7, L↔1, and more
+- **O/I prohibition enforcement**: India bans O and I in series letters — forces correction
+- **Score-based candidate selection**: When multiple preprocessing methods produce different valid plates, picks the most typical one
+- **Flexible parsing**: Handles variable RTO lengths, 0-3 series letters, and leading junk characters
 
 ## 🔐 Privacy & Security
 
@@ -254,11 +279,13 @@ font = "sans serif"
 
 ## 🐛 Known Limitations
 
-- Works best with clear, well-lit images
+- Works best with clear, well-lit images and videos
 - Requires visible number plates
 - Performance depends on model quality
-- Large images may take longer to process
-- OCR accuracy varies with plate condition
+- Large images/videos may take longer to process
+- OCR accuracy varies with plate condition (faded, hand-painted, non-HSRP)
+- Video processing speed depends on frame-skip setting and video length
+- Military, diplomatic, and temporary plates are not validated (returned as INVALID)
 
 ## 📈 Performance Tips
 
@@ -298,7 +325,7 @@ For issues or questions:
 
 ---
 
-**Version**: 1.0.0  
+**Version**: 2.0.0  
 **Last Updated**: February 2026
 
 Happy Traffic Analyzing! 🚗🚦
