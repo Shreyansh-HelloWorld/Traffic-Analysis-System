@@ -7,7 +7,6 @@ import io
 import os
 from pathlib import Path
 import tempfile
-import os
 os.environ["YOLO_CPUINFO"] = "False"
 
 # Import custom modules
