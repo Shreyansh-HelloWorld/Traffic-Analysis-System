@@ -67,23 +67,24 @@ class ANPRDetector:
     }
     
     # ─── Common 2-char OCR misreads → correct state code ───
+    # ONLY unambiguous mappings — each key can only mean ONE state code.
+    # Ambiguous patterns like "00" (could be DD, DL, OD) are left
+    # to the brute-force substitution in _fix_state_code().
     STATE_OCR_FIXES = {
         "XA": "KA", "X4": "KA", "K4": "KA",           # Karnataka
-        "DI": "DL", "D1": "DL",                           # Delhi
-        "0L": "DL", "OL": "DL",                           # Delhi (0/O misread as D)
+        "DI": "DL", "D1": "DL",                         # Delhi
+        "0L": "DL", "OL": "DL",                         # Delhi (0/O misread as D)
         "0D": "OD", "O0": "OD", "01": "OD",             # Odisha
-        "00": "DD",                                        # Dadra & Nagar Haveli (D→0 both chars)
-        "0N": "DN",                                        # Dadra & Nagar Haveli (legacy)
-        "6A": "GA", "G4": "GA",                          # Goa
-        "6J": "GJ",                                       # Gujarat
-        "8R": "BR", "8K": "BR",                           # Bihar
-        "N1": "NL",                                        # Nagaland
-        "C6": "CG",                                        # Chhattisgarh
-        "T5": "TS",                                        # Telangana (legacy)
+        "6A": "GA", "G4": "GA",                         # Goa
+        "6J": "GJ",                                      # Gujarat
+        "8R": "BR", "8K": "BR",                          # Bihar
+        "N1": "NL",                                       # Nagaland
+        "C6": "CG",                                       # Chhattisgarh
+        "T5": "TS",                                       # Telangana (legacy)
         "7N": "TN", "7R": "TR", "76": "TG", "T6": "TG", # TN/TR/TG
-        "5K": "SK",                                        # Sikkim
-        "M2": "MZ",                                        # Mizoram
-        "HA": "HR",                                        # Haryana (R→A is rare but happens)
+        "5K": "SK",                                       # Sikkim
+        "M2": "MZ",                                       # Mizoram
+        "HA": "HR",                                       # Haryana
     }
     
     # ─── Standard format regex ───
