@@ -333,10 +333,29 @@ def _image_analysis_ui(vehicle_conf, plate_conf):
         )
         
         if uploaded_file is not None:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Image")
+            # Robust image loading — handles corrupted, HEIC, or truncated files
+            image = None
+            try:
+                uploaded_file.seek(0)
+                image = Image.open(uploaded_file)
+                image.load()  # Force full decode to catch truncated files
+            except Exception:
+                # Fallback: try decoding with OpenCV
+                try:
+                    uploaded_file.seek(0)
+                    file_bytes = np.frombuffer(uploaded_file.read(), dtype=np.uint8)
+                    img_cv = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                    if img_cv is not None:
+                        image = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
+                    else:
+                        st.error("❌ Could not decode this image. Please try a different file.")
+                except Exception:
+                    st.error("❌ Could not open this image. The file may be corrupted or in an unsupported format (e.g. HEIC). Please convert it to JPG/PNG and try again.")
             
-            if st.button("🔍 Analyze Traffic", type="primary", key="analyze_img"):
+            if image is not None:
+                st.image(image, caption="Uploaded Image")
+            
+            if image is not None and st.button("🔍 Analyze Traffic", type="primary", key="analyze_img"):
                 anpr_detector, vehicle_classifier = initialize_models()
                 
                 if anpr_detector and vehicle_classifier:

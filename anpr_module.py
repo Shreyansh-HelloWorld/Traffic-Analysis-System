@@ -69,8 +69,11 @@ class ANPRDetector:
     # ─── Common 2-char OCR misreads → correct state code ───
     STATE_OCR_FIXES = {
         "XA": "KA", "X4": "KA", "K4": "KA",           # Karnataka
-        "DI": "DL", "D1": "DL", "01": "OD",            # Delhi, Odisha
-        "0D": "OD", "O0": "OD",                         # Odisha
+        "DI": "DL", "D1": "DL",                           # Delhi
+        "0L": "DL", "OL": "DL",                           # Delhi (0/O misread as D)
+        "0D": "OD", "O0": "OD", "01": "OD",             # Odisha
+        "00": "DD",                                        # Dadra & Nagar Haveli (D→0 both chars)
+        "0N": "DN",                                        # Dadra & Nagar Haveli (legacy)
         "6A": "GA", "G4": "GA",                          # Goa
         "6J": "GJ",                                       # Gujarat
         "8R": "BR", "8K": "BR",                           # Bihar
@@ -80,9 +83,7 @@ class ANPRDetector:
         "7N": "TN", "7R": "TR", "76": "TG", "T6": "TG", # TN/TR/TG
         "5K": "SK",                                        # Sikkim
         "M2": "MZ",                                        # Mizoram
-        "U1<": "UK",                                       # Uttarakhand
         "HA": "HR",                                        # Haryana (R→A is rare but happens)
-        "IIH": "MH",                                      # Maharashtra (M→IVI sometimes)
     }
     
     # ─── Standard format regex ───
@@ -226,6 +227,11 @@ class ANPRDetector:
             c0_options.append(self.DIGIT_TO_LETTER[raw[0]])
         if raw[1] in self.DIGIT_TO_LETTER:
             c1_options.append(self.DIGIT_TO_LETTER[raw[1]])
+        # 0 can look like both O and D — try D explicitly
+        if raw[0] == '0':
+            c0_options.append('D')
+        if raw[1] == '0':
+            c1_options.append('D')
         # Also try letter→different letter for common confusions
         extra_letter_map = {
             'X': 'K', 'N': 'H', 'H': 'N', 'W': 'M',
