@@ -58,6 +58,13 @@ class ANPRDetector:
         'Z': '2', 'G': '6', 'D': '0', 'Q': '0',
         'T': '7', 'A': '4', 'L': '1', 'J': '1',
     }
+    # Strict subset: only high-confidence digit look-alikes.
+    # Used for positional detection (backward walk, RTO boundary)
+    # to avoid swallowing real series letters like A, T, L, J.
+    STRICT_DIGIT_LIKES = {
+        'O': '0', 'I': '1', 'S': '5', 'B': '8',
+        'Z': '2', 'G': '6', 'D': '0', 'Q': '0',
+    }
     
     # ─── Common 2-char OCR misreads → correct state code ───
     STATE_OCR_FIXES = {
@@ -269,8 +276,8 @@ class ANPRDetector:
             ch = rest[i]
             if ch.isdigit():
                 rto_len += 1
-            elif ch in self.LETTER_TO_DIGIT:
-                # Could be a letter misread as digit position
+            elif ch in self.STRICT_DIGIT_LIKES:
+                # High-confidence digit look-alike in RTO position
                 rto_len += 1
             else:
                 break
@@ -281,14 +288,14 @@ class ANPRDetector:
         # Allow single-digit RTO for Delhi, otherwise need at least 1
         if rto_len == 1 and state != "DL":
             # Try converting the char after RTO digit if it looks like a digit
-            if len(rest) > 1 and rest[1] in self.LETTER_TO_DIGIT:
+            if len(rest) > 1 and rest[1] in self.STRICT_DIGIT_LIKES:
                 rto_len = 2
         
         # ── Fix RTO digits ──
         rto_chars = list(rest[:rto_len])
         for i in range(len(rto_chars)):
-            if rto_chars[i] in self.LETTER_TO_DIGIT:
-                rto_chars[i] = self.LETTER_TO_DIGIT[rto_chars[i]]
+            if rto_chars[i] in self.STRICT_DIGIT_LIKES:
+                rto_chars[i] = self.STRICT_DIGIT_LIKES[rto_chars[i]]
         rto = ''.join(rto_chars)
         if not rto.isdigit():
             return None
@@ -300,11 +307,12 @@ class ANPRDetector:
         # ── Split remaining into series letters + registration number ──
         # Find where the trailing digits (registration number) start
         # Walk backward from end to find the digit block
+        # Use STRICT set so series letters like A, T, L, J aren't swallowed
         num_end = len(remaining)
         num_start = num_end
         for j in range(num_end - 1, -1, -1):
             ch = remaining[j]
-            if ch.isdigit() or ch in self.LETTER_TO_DIGIT:
+            if ch.isdigit() or ch in self.STRICT_DIGIT_LIKES:
                 num_start = j
             else:
                 break
