@@ -93,6 +93,22 @@ class ANPRDetector:
     # Bharat Series: YY BH DDDD AA
     RE_BH = re.compile(r'^[0-9]{2}BH[0-9]{1,4}[A-Z]{1,2}$')
     
+    # ─── Maximum RTO code per state/UT ───
+    # Source: MoRTH / Parivahan data (updated Feb 2026).
+    # A value of 99 = we don't know the exact max, accept any 2-digit code.
+    MAX_RTO = {
+        "AN": 2,  "AP": 40, "AR": 22, "AS": 34, "BR": 78,
+        "CH": 4,  "CG": 30, "DD": 6,  "DL": 16, "GA": 12,
+        "GJ": 39, "HR": 99, "HP": 99, "JH": 23, "JK": 22,
+        "KA": 70, "KL": 99, "LA": 3,  "LD": 9,  "MH": 53,
+        "ML": 10, "MN": 7,  "MP": 76, "MZ": 8,  "NL": 11,
+        "OD": 35, "PB": 99, "PY": 5,  "RJ": 53, "SK": 8,
+        "TN": 99, "TR": 8,  "TG": 38, "UK": 20, "UP": 95,
+        "WB": 99,
+        # Legacy
+        "TS": 38, "OR": 35, "DN": 6,  "UA": 20,
+    }
+    
     def __init__(self, model_path, conf_threshold=0.4):
         """
         Initialize ANPR Detector
@@ -262,43 +278,93 @@ class ANPRDetector:
                 return raw[i:]
         return raw
     
+    def _is_valid_rto(self, state, rto_str):
+        """
+        Check if RTO code is within the known range for this state.
+        Returns True if valid, False if definitely impossible.
+        """
+        if not rto_str.isdigit():
+            return False
+        rto_num = int(rto_str)
+        if rto_num == 0:
+            return False  # No state uses RTO 0
+        max_rto = self.MAX_RTO.get(state, 99)
+        return rto_num <= max_rto
+    
     def _parse_plate_body(self, state, rest):
         """
         Parse the body after the state code:
           rest = RTO(1-2 digits) + Series(0-3 letters) + Number(1-4 digits)
         
+        Strategy: try multiple structural interpretations, validate each
+        against RTO range rules, and return the best valid candidate.
+        
         Handles:
-          • Delhi single-digit RTO
-          • No-series older plates (SS DD DDDD)
+          • Delhi single-digit RTO  (DL1–DL16)
+          • Other states: 2-digit RTO mandatory
+          • RTO range validation per state
+          • No-series older plates  SS DD DDDD
           • O/I prohibition in series letters
-          • Full OCR confusion correction for each positional slot
         """
         if len(rest) < 3:
             return None
         
-        # ── Determine RTO length ──
-        # Count ONLY actual digit characters for RTO boundary.
-        # Confusion correction (S→5, B→8 etc.) is done AFTER structure is known.
-        # Delhi can have 1-digit RTO (DL1–DL16); others use 2-digit.
-        rto_len = 0
+        # ── Count leading actual digits ──
+        leading_digits = 0
         for i in range(min(2, len(rest))):
             if rest[i].isdigit():
-                rto_len += 1
+                leading_digits += 1
             else:
                 break
         
-        if rto_len == 0:
+        if leading_digits == 0:
             return None
         
-        # Non-Delhi states MUST have 2-digit RTO.
-        # If we only found 1 actual digit AND the next char is a
-        # high-confidence digit look-alike (O→0, I→1, etc.), absorb it.
-        if rto_len == 1 and state != "DL":
-            if len(rest) > 1 and rest[1] in self.STRICT_DIGIT_LIKES:
-                rto_len = 2
-            else:
-                # Can't form a valid 2-digit RTO → fail this parse
-                return None
+        # ── Build list of RTO lengths to try ──
+        # For Delhi: try 1-digit first (more common), then 2-digit
+        # For others: must be 2-digit
+        rto_attempts = []
+        
+        if state == "DL":
+            # Delhi uses single-digit RTOs (DL1–DL16)
+            if leading_digits >= 1:
+                rto_attempts.append(1)
+            if leading_digits >= 2:
+                rto_attempts.append(2)
+        else:
+            # All other states use 2-digit RTOs
+            if leading_digits >= 2:
+                rto_attempts.append(2)
+            elif leading_digits == 1:
+                # Only 1 digit found — try absorbing a STRICT look-alike as 2nd
+                if len(rest) > 1 and rest[1] in self.STRICT_DIGIT_LIKES:
+                    rto_attempts.append(2)
+                # else: can't form valid 2-digit RTO
+        
+        # ── Try each RTO length and pick the best ──
+        candidates = []
+        for rto_len in rto_attempts:
+            result = self._try_parse_with_rto(state, rest, rto_len)
+            if result:
+                candidates.append(result)
+        
+        if not candidates:
+            # Fallback to flexible reparse
+            return self._reparse_flexible(state, rest)
+        
+        if len(candidates) == 1:
+            return candidates[0]
+        
+        # Multiple valid candidates — pick highest score
+        return max(candidates, key=lambda c: self._plate_score(c))
+    
+    def _try_parse_with_rto(self, state, rest, rto_len):
+        """
+        Attempt to parse plate body with a specific RTO length.
+        Returns candidate string if valid, None otherwise.
+        """
+        if rto_len > len(rest):
+            return None
         
         # ── Fix RTO digits ──
         rto_chars = list(rest[:rto_len])
@@ -309,13 +375,16 @@ class ANPRDetector:
         if not rto.isdigit():
             return None
         
+        # ── Validate RTO range ──
+        if not self._is_valid_rto(state, rto):
+            return None
+        
         remaining = rest[rto_len:]
         if len(remaining) == 0:
             return None
         
         # ── Split remaining into series letters + registration number ──
-        # Find where the trailing digits (registration number) start
-        # Walk backward from end to find the digit block
+        # Walk backward to find the trailing digit block
         # Use STRICT set so series letters like A, T, L, J aren't swallowed
         num_end = len(remaining)
         num_start = num_end
@@ -342,37 +411,31 @@ class ANPRDetector:
         if not number.isdigit() or len(number) > 4 or len(number) == 0:
             return None
         
-        # Pad to 4 digits if reasonable (e.g., "786" → "0786")
-        if len(number) < 4 and len(number) >= 1:
+        # Pad to 4 digits
+        if len(number) < 4:
             number = number.zfill(4)
         
         # ── Fix series letters ──
         series_chars = list(series_raw)
         for i in range(len(series_chars)):
             ch = series_chars[i]
-            # India prohibits O and I in series letters → force to digit
             if ch == 'O':
-                series_chars[i] = '0'  # Likely was a digit misread
+                series_chars[i] = '0'   # O prohibited in series
             elif ch == 'I':
-                series_chars[i] = '1'  # Likely was a digit misread
-            # Digits in series position → convert to letter
+                series_chars[i] = '1'   # I prohibited in series
             elif ch in self.DIGIT_TO_LETTER:
                 series_chars[i] = self.DIGIT_TO_LETTER[ch]
         
         series = ''.join(series_chars)
         
-        # If series has digits left (shouldn't), this plate is malformed
         if series and not series.isalpha():
-            # One more attempt: maybe the digit is actually part of RTO or number
-            # Reparse with different RTO length
-            return self._reparse_flexible(state, rest)
+            return None  # Series must be pure letters
         
         if len(series) > 3:
-            return None   # Max 3 series letters
+            return None
         
         candidate = state + rto + series + number
         
-        # ── Validate final format ──
         if self.RE_STANDARD.match(candidate):
             return candidate
         
@@ -381,8 +444,10 @@ class ANPRDetector:
     def _reparse_flexible(self, state, rest):
         """
         Fallback: try all possible RTO/series/number splits
-        and return the first valid one.
+        and return the best valid one (with RTO range validation).
         """
+        candidates = []
+        
         # Try RTO lengths 1 and 2
         for rto_len in (2, 1):
             if rto_len > len(rest):
@@ -394,6 +459,10 @@ class ANPRDetector:
             rto_chars = [self.LETTER_TO_DIGIT.get(c, c) for c in rto_raw]
             rto = ''.join(rto_chars)
             if not rto.isdigit():
+                continue
+            
+            # ── Validate RTO range ──
+            if not self._is_valid_rto(state, rto):
                 continue
             
             tail = rest[rto_len:]
@@ -412,12 +481,6 @@ class ANPRDetector:
                         series_chars.append(self.DIGIT_TO_LETTER[ch])
                     elif ch.isalpha() and ch not in ('O', 'I'):
                         series_chars.append(ch)
-                    elif ch == 'O':
-                        valid_series = False
-                        break
-                    elif ch == 'I':
-                        valid_series = False
-                        break
                     else:
                         valid_series = False
                         break
@@ -436,9 +499,13 @@ class ANPRDetector:
                 
                 candidate = state + rto + series + number
                 if self.RE_STANDARD.match(candidate):
-                    return candidate
+                    candidates.append(candidate)
         
-        return None
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        return max(candidates, key=lambda c: self._plate_score(c))
     
     @staticmethod
     def _plate_score(plate):
@@ -450,15 +517,23 @@ class ANPRDetector:
             return -1
         score = len(plate)  # Longer = more complete
         # Prefer 4-digit registration numbers
-        m = re.match(r'^[A-Z]{2}(\d{1,2})([A-Z]{0,3})(\d{1,4})$', plate)
+        m = re.match(r'^([A-Z]{2})(\d{1,2})([A-Z]{0,3})(\d{1,4})$', plate)
         if m:
-            rto, series, num = m.group(1), m.group(2), m.group(3)
+            state, rto, series, num = m.group(1), m.group(2), m.group(3), m.group(4)
             if len(num) == 4:
                 score += 5
             if len(rto) == 2:
                 score += 2
             if 1 <= len(series) <= 2:
                 score += 2   # Most common series length
+            # Bonus for valid RTO range
+            max_rto = ANPRDetector.MAX_RTO.get(state)
+            if max_rto is not None:
+                rto_num = int(rto)
+                if 1 <= rto_num <= max_rto:
+                    score += 3  # Valid RTO range bonus
+                else:
+                    score -= 5  # Penalise impossible RTO
         return score
     
     @staticmethod
