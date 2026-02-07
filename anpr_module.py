@@ -1,78 +1,4 @@
-Detailed Results
-
-🖼️ Gallery View
-
-
-📊 Table View
-
-
-📄 Export Data
-
-Vehicle #1 - 4W - DL3CCA1750
-
-📸 Number Plate
-
-
-0
-🚗 Vehicle Info
-
-Type: 4W
-
-Class: car
-
-Confidence: 97.43%
-
-🔤 OCR Results
-
-✅ DL3CCA1750
-
-Raw OCR: DL3CCA1750
-
-Plate Conf: 78.57%
-
-Vehicle #2 - 4W - UNREADABLE
-
-📸 Number Plate
-
-
-0
-🚗 Vehicle Info
-
-Type: 4W
-
-Class: car
-
-Confidence: 97.43%
-
-🔤 OCR Results
-
-❌ UNREADABLE
-
-Raw OCR: UNREADABLE
-
-Plate Conf: 46.13%
-
-Vehicle #3 - 4W - UP32CR0423
-
-📸 Number Plate
-
-
-0
-🚗 Vehicle Info
-
-Type: 4W
-
-Class: car
-
-Confidence: 97.32%
-
-🔤 OCR Results
-
-✅ UP32CR0423
-
-Raw OCR: UP32CRO423
-
-Plate Conf: 74.71%import cv2
+import cv2
 import numpy as np
 import re
 import os
@@ -195,10 +121,14 @@ class ANPRDetector:
         self.conf_threshold = conf_threshold
         
         # Initialize PaddleOCR
+        # det=True is critical: even on YOLO-cropped plates, PaddleOCR's
+        # DB detector finds the exact text region, perspective-corrects it,
+        # and calculates the optimal aspect ratio for recognition.
+        # This gives dramatically better raw OCR than det=False.
         self.ocr = PaddleOCR(
             use_angle_cls=True,
             lang="en",
-            det=False,
+            det=True,
             rec=True,
             show_log=False,
             use_gpu=False
@@ -654,57 +584,79 @@ class ANPRDetector:
     
     @staticmethod
     def preprocess_v1(crop):
-        """Grayscale + CLAHE + Bilateral Filter"""
+        """Grayscale + CLAHE + Bilateral Filter → back to BGR"""
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
         denoised = cv2.bilateralFilter(enhanced, 9, 75, 75)
-        return denoised
+        return cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
     
     @staticmethod
     def preprocess_v2(crop):
-        """Grayscale + Sharpening + Adaptive Threshold"""
+        """Grayscale + Sharpening + Otsu threshold → back to BGR"""
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
         sharpened = cv2.filter2D(gray, -1, kernel)
-        thresh = cv2.adaptiveThreshold(
-            sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2
-        )
-        return thresh
+        _, thresh = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
     
     @staticmethod
     def preprocess_v3(crop):
-        """Upscale + Grayscale + Contrast Enhancement"""
+        """Upscale + Grayscale + Contrast Enhancement → back to BGR"""
         upscaled = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
         gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
         alpha = 1.5  # Contrast
         beta = 0     # Brightness
         enhanced = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
-        return enhanced
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
     
     @staticmethod
     def preprocess_v4(crop):
-        """Grayscale + Morphological Operations"""
+        """Grayscale + Morphological Operations → back to BGR"""
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         morph = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-        return morph
+        return cv2.cvtColor(morph, cv2.COLOR_GRAY2BGR)
     
     @staticmethod
     def preprocess_v5(crop):
-        """Upscale 3x + Denoise + Sharpen"""
-        upscaled = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        """Upscale 2x + Denoise + Sharpen → back to BGR"""
+        upscaled = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
         gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
         denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
         kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
         sharpened = cv2.filter2D(denoised, -1, kernel)
-        return sharpened
+        return cv2.cvtColor(sharpened, cv2.COLOR_GRAY2BGR)
+    
+    @staticmethod
+    def _extract_ocr_text(ocr_res):
+        """
+        Extract raw text from PaddleOCR result.
+        Works with both det=True and det=False output formats.
+        
+        det=True  → [[box, (text, conf)], [box, (text, conf)], ...]
+        det=False → [[(text, conf)], ...] or [[(idx, text, conf)], ...]
+        """
+        if not ocr_res or not ocr_res[0]:
+            return None
+        
+        texts = []
+        for line in ocr_res[0]:
+            if isinstance(line, list) and len(line) == 2:
+                # det=True format: [box_coords, (text, conf)]
+                if isinstance(line[1], (list, tuple)) and len(line[1]) >= 1:
+                    texts.append(str(line[1][0]))
+            elif isinstance(line, (list, tuple)):
+                # det=False format: (text, conf)
+                if len(line) >= 1:
+                    texts.append(str(line[0]))
+        
+        return "".join(texts) if texts else None
     
     def perform_ocr(self, crop):
         """
         Perform OCR with multiple preprocessing methods.
-        Uses PaddleOCR + full post-processing for best accuracy.
+        Uses PaddleOCR (det=True) + full post-processing for best accuracy.
         Picks the highest-scored valid plate among all attempts.
         """
         if crop is None or crop.size == 0:
@@ -712,24 +664,24 @@ class ANPRDetector:
         
         results = []
         
-        # Try original image first
+        # Try original image first (BGR, 3-channel)
         try:
             ocr_res = self.ocr.ocr(crop, cls=True)
-            if ocr_res and ocr_res[0]:
-                raw_text = "".join([l[1][0] for l in ocr_res[0]])
+            raw_text = self._extract_ocr_text(ocr_res)
+            if raw_text:
                 plate = self.smart_post_process(raw_text)
                 results.append((raw_text, plate))
         except:
             pass
         
-        # Try all 5 preprocessing methods
+        # Try all 5 preprocessing methods (all return BGR 3-channel)
         for fn in [self.preprocess_v1, self.preprocess_v2, self.preprocess_v3,
                    self.preprocess_v4, self.preprocess_v5]:
             try:
                 processed = fn(crop)
                 ocr_res = self.ocr.ocr(processed, cls=True)
-                if ocr_res and ocr_res[0]:
-                    raw_text = "".join([l[1][0] for l in ocr_res[0]])
+                raw_text = self._extract_ocr_text(ocr_res)
+                if raw_text:
                     plate = self.smart_post_process(raw_text)
                     results.append((raw_text, plate))
             except:
