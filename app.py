@@ -253,6 +253,11 @@ def main():
                             st.markdown("**📸 Number Plate**")
                             if result['plate_crop'] is not None and result['plate_crop'].size > 0:
                                 plate_rgb = cv2.cvtColor(result['plate_crop'], cv2.COLOR_BGR2RGB)
+                                # Upscale plate image for better visibility
+                                h, w = plate_rgb.shape[:2]
+                                scale = max(1, 300 // max(w, 1))  # Scale to at least 300px wide
+                                if scale > 1:
+                                    plate_rgb = cv2.resize(plate_rgb, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
                                 st.image(plate_rgb)
                             else:
                                 st.warning("No plate crop available")

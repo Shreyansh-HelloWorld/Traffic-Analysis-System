@@ -4,13 +4,19 @@ import re
 import os
 import warnings
 import torch
+from ultralytics.nn.tasks import DetectionModel
 
 # Suppress harmless PyTorch torch.classes introspection warnings
 warnings.filterwarnings("ignore", message=".*Examining the path of torch.classes.*")
 warnings.filterwarnings("ignore", message=".*Tried to instantiate class.*")
 
+# Try to add safe globals if the method exists (PyTorch 2.3+)
+try:
+    torch.serialization.add_safe_globals([DetectionModel])
+except AttributeError:
+    pass
+
 # Patch torch.load to use weights_only=False for YOLO model loading (PyTorch 2.6+ compatibility)
-# This is safe because we trust our own model files in the models/ directory
 _original_torch_load = torch.load
 def _patched_torch_load(*args, **kwargs):
     if 'weights_only' not in kwargs:
@@ -20,8 +26,9 @@ torch.load = _patched_torch_load
 
 from ultralytics import YOLO
 
-# Use EasyOCR - works on Python 3.13 (Streamlit Cloud)
-import easyocr
+# Disable CUDA for PaddleOCR
+os.environ["FLAGS_use_cuda"] = "0"
+from paddleocr import PaddleOCR
 
 class ANPRDetector:
     """Automatic Number Plate Recognition Detector"""
@@ -45,11 +52,14 @@ class ANPRDetector:
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         
-        # Initialize EasyOCR - optimized for license plates
-        self.ocr = easyocr.Reader(
-            ['en'],
-            gpu=False,
-            verbose=False
+        # Initialize PaddleOCR - same as reference repo
+        self.ocr = PaddleOCR(
+            use_angle_cls=True,
+            lang="en",
+            det=False,
+            rec=True,
+            show_log=False,
+            use_gpu=False
         )
     
     def detect_plates(self, image):
@@ -86,84 +96,141 @@ class ANPRDetector:
     def smart_post_process(self, raw_text):
         """
         Post-process OCR text to extract valid Indian number plate
-        Simplified approach matching successful Colab notebook
-        
-        Args:
-            raw_text: Raw OCR output
-            
-        Returns:
-            Cleaned and validated plate number
+        Full post-processing with digit/letter corrections
         """
         if not raw_text:
             return "UNREADABLE"
         
         raw = self.clean_plate(raw_text)
         
-        # Find valid state code (matching Colab approach)
+        # Special state-code OCR corrections
+        if raw.startswith("XA"):
+            candidate = "KA" + raw[2:]
+            if re.match(r'^KA[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$', candidate):
+                raw = candidate
+        
+        if raw.startswith("DI"):
+            candidate = "DL" + raw[2:]
+            if re.match(r'^DL[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$', candidate):
+                raw = candidate
+        
+        # Find valid state code
         for i in range(len(raw) - 1):
             if raw[i:i+2] in self.STATE_CODES:
                 raw = raw[i:]
                 break
         
-        if len(raw) < 6 or raw[:2] not in self.STATE_CODES:
+        if len(raw) < 8 or raw[:2] not in self.STATE_CODES:
+            # Check for Bharat Series (BH): format YYBHXXXXAA
+            if re.match(r'^[0-9]{2}BH[0-9]{4}[A-Z]{2}$', raw):
+                return raw
             return "INVALID"
         
         state = raw[:2]
-        rest = list(raw[2:])
+        rest = raw[2:]
         
-        # Simple character corrections (matching Colab approach)
-        for i in range(len(rest)):
-            if i < 2:
-                # RTO code positions: letters often misread as digits
-                rest[i] = rest[i].replace('O', '0').replace('I', '1')
-            elif i >= len(rest) - 4:
-                # Last 4 positions should be digits
-                rest[i] = rest[i].replace('O', '0').replace('I', '1').replace('S', '5').replace('B', '8')
+        if len(rest) < 4:
+            return "INVALID"
         
-        plate = state + ''.join(rest)
+        # Last 4 digits (strict digit slot)
+        number = list(rest[-4:])
+        for i in range(4):
+            if number[i] == 'O': number[i] = '0'
+            if number[i] == 'I': number[i] = '1'
+            if number[i] == 'S': number[i] = '5'
+            if number[i] == 'B': number[i] = '8'
+            if number[i] == 'Z': number[i] = '2'
+            if number[i] == 'G': number[i] = '6'
+            if number[i] == 'D': number[i] = '0'
+            if number[i] == 'Q': number[i] = '0'
         
-        # Standard Indian plate format: AA00AA0000 or AA0AA0000
-        if re.match(r'^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$', plate):
-            return plate
+        number = ''.join(number)
         
-        # Bharat Series (BH): 00BH0000AA
-        if re.match(r'^[0-9]{2}BH[0-9]{4}[A-Z]{2}$', plate):
-            return plate
+        # Middle part = RTO digits + series letters
+        middle = list(rest[:-4])
+        
+        # First 1-2 chars → RTO digits
+        for i in range(min(2, len(middle))):
+            if middle[i] == 'O': middle[i] = '0'
+            if middle[i] == 'I': middle[i] = '1'
+            if middle[i] == 'S': middle[i] = '5'
+            if middle[i] == 'B': middle[i] = '8'
+            if middle[i] == 'Z': middle[i] = '2'
+            if middle[i] == 'G': middle[i] = '6'
+        
+        # Remaining → series letters (reverse OCR confusion)
+        for i in range(2, len(middle)):
+            if middle[i] == '8': middle[i] = 'B'
+            if middle[i] == '0': middle[i] = 'O'
+            if middle[i] == '1': middle[i] = 'I'
+            if middle[i] == '5': middle[i] = 'S'
+            if middle[i] == '2': middle[i] = 'Z'
+            if middle[i] == '6': middle[i] = 'G'
+        
+        candidate = state + ''.join(middle) + number
+        
+        # Standard Indian plate format
+        if re.match(r'^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$', candidate):
+            return candidate
+        
+        # Bharat Series (BH)
+        if re.match(r'^[0-9]{2}BH[0-9]{4}[A-Z]{2}$', candidate):
+            return candidate
         
         return "INVALID"
     
-    def _run_ocr(self, image):
-        """Run OCR on image using EasyOCR"""
-        try:
-            # Ensure image is numpy array
-            if not isinstance(image, np.ndarray):
-                image = np.array(image)
-            
-            # Convert grayscale to BGR if needed
-            if len(image.shape) == 2:
-                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-            
-            # Run EasyOCR with allowlist for plate characters
-            results = self.ocr.readtext(
-                image,
-                detail=1,
-                paragraph=False,
-                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            )
-            
-            if results:
-                # Combine all text like PaddleOCR approach
-                texts = [text for (bbox, text, conf) in results if conf > 0.1]
-                if texts:
-                    return "".join(texts).upper()
-            
-        except Exception as e:
-            print(f"  -> OCR error: {e}")
-        return None
+    @staticmethod
+    def preprocess_v1(crop):
+        """Grayscale + CLAHE + Bilateral Filter"""
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        denoised = cv2.bilateralFilter(enhanced, 9, 75, 75)
+        return denoised
+    
+    @staticmethod
+    def preprocess_v2(crop):
+        """Grayscale + Sharpening + Adaptive Threshold"""
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+        sharpened = cv2.filter2D(gray, -1, kernel)
+        thresh = cv2.adaptiveThreshold(
+            sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 11, 2
+        )
+        return thresh
+    
+    @staticmethod
+    def preprocess_v3(crop):
+        """Upscale + Grayscale + Contrast Enhancement"""
+        upscaled = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+        alpha = 1.5  # Contrast
+        beta = 0     # Brightness
+        enhanced = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
+        return enhanced
+    
+    @staticmethod
+    def preprocess_v4(crop):
+        """Grayscale + Morphological Operations"""
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        morph = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+        return morph
+    
+    @staticmethod
+    def preprocess_v5(crop):
+        """Upscale 3x + Denoise + Sharpen"""
+        upscaled = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
+        denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        sharpened = cv2.filter2D(denoised, -1, kernel)
+        return sharpened
     
     def perform_ocr(self, crop):
         """
-        Perform OCR - simplified approach matching successful Colab notebook
+        Perform OCR with multiple preprocessing methods
         
         Args:
             crop: Cropped plate image
@@ -174,63 +241,48 @@ class ANPRDetector:
         if crop is None or crop.size == 0:
             return "UNREADABLE", "UNREADABLE"
         
-        # Ensure crop is valid size
-        if crop.shape[0] < 10 or crop.shape[1] < 10:
-            return "UNREADABLE", "UNREADABLE"
-        
         results = []
         
-        # Method 1: Direct OCR on original crop (like Colab - this worked best!)
-        print("  -> Trying direct OCR on original crop...")
-        raw_text = self._run_ocr(crop)
-        if raw_text:
-            print(f"  -> OCR result: {raw_text}")
-            final_plate = self.smart_post_process(raw_text)
-            if final_plate not in ["INVALID", "UNREADABLE"]:
-                return (raw_text, final_plate)
-            results.append((raw_text, final_plate))
+        # Try original image first
+        try:
+            ocr_res = self.ocr.ocr(crop, cls=True)
+            if ocr_res and ocr_res[0]:
+                raw_text = "".join([l[1][0] for l in ocr_res[0]])
+                final_plate = self.smart_post_process(raw_text)
+                results.append((raw_text, final_plate))
+        except:
+            pass
         
-        # Method 2: Simple upscale only (helps with small plates)
-        print("  -> Trying 2x upscale...")
-        upscaled = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        raw_text = self._run_ocr(upscaled)
-        if raw_text:
-            print(f"  -> OCR result: {raw_text}")
-            final_plate = self.smart_post_process(raw_text)
-            if final_plate not in ["INVALID", "UNREADABLE"]:
-                return (raw_text, final_plate)
-            results.append((raw_text, final_plate))
+        # Try preprocessing methods
+        preprocessing_methods = [
+            self.preprocess_v1,
+            self.preprocess_v2,
+            self.preprocess_v3,
+            self.preprocess_v4,
+            self.preprocess_v5
+        ]
         
-        # Method 3: Grayscale + contrast (simple preprocessing)
-        print("  -> Trying grayscale + contrast...")
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        enhanced = cv2.convertScaleAbs(gray, alpha=1.5, beta=10)
-        raw_text = self._run_ocr(enhanced)
-        if raw_text:
-            print(f"  -> OCR result: {raw_text}")
-            final_plate = self.smart_post_process(raw_text)
-            if final_plate not in ["INVALID", "UNREADABLE"]:
-                return (raw_text, final_plate)
-            results.append((raw_text, final_plate))
+        for preprocess_func in preprocessing_methods:
+            try:
+                processed = preprocess_func(crop)
+                ocr_res = self.ocr.ocr(processed, cls=True)
+                if ocr_res and ocr_res[0]:
+                    raw_text = "".join([l[1][0] for l in ocr_res[0]])
+                    final_plate = self.smart_post_process(raw_text)
+                    results.append((raw_text, final_plate))
+            except:
+                continue
         
-        # Method 4: Upscale + grayscale (combination)
-        print("  -> Trying upscale + grayscale...")
-        upscaled_gray = cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)
-        raw_text = self._run_ocr(upscaled_gray)
-        if raw_text:
-            print(f"  -> OCR result: {raw_text}")
-            final_plate = self.smart_post_process(raw_text)
-            if final_plate not in ["INVALID", "UNREADABLE"]:
-                return (raw_text, final_plate)
-            results.append((raw_text, final_plate))
+        # Find the best result (prioritize valid plates)
+        valid_results = [r for r in results if r[1] not in ["INVALID", "UNREADABLE"]]
         
-        # If no valid plate found, return best raw result
-        if results:
-            # Prefer results with more alphanumeric characters
-            non_unreadable = [r for r in results if r[0] and r[0] != "UNREADABLE"]
+        if valid_results:
+            return valid_results[0]
+        elif results:
+            # Return the best raw OCR even if invalid
+            non_unreadable = [r for r in results if r[0] != "UNREADABLE"]
             if non_unreadable:
-                best = max(non_unreadable, key=lambda x: len(self.clean_plate(x[0])))
-                return best
+                return max(non_unreadable, key=lambda x: len(x[0]))
             return results[0]
         
         return "UNREADABLE", "UNREADABLE"
