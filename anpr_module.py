@@ -277,14 +277,12 @@ class ANPRDetector:
             return None
         
         # ── Determine RTO length ──
-        # Delhi can have 1-digit RTO; others 2-digit
+        # Count ONLY actual digit characters for RTO boundary.
+        # Confusion correction (S→5, B→8 etc.) is done AFTER structure is known.
+        # Delhi can have 1-digit RTO (DL1–DL16); others use 2-digit.
         rto_len = 0
         for i in range(min(2, len(rest))):
-            ch = rest[i]
-            if ch.isdigit():
-                rto_len += 1
-            elif ch in self.STRICT_DIGIT_LIKES:
-                # High-confidence digit look-alike in RTO position
+            if rest[i].isdigit():
                 rto_len += 1
             else:
                 break
@@ -292,11 +290,15 @@ class ANPRDetector:
         if rto_len == 0:
             return None
         
-        # Allow single-digit RTO for Delhi, otherwise need at least 1
+        # Non-Delhi states MUST have 2-digit RTO.
+        # If we only found 1 actual digit AND the next char is a
+        # high-confidence digit look-alike (O→0, I→1, etc.), absorb it.
         if rto_len == 1 and state != "DL":
-            # Try converting the char after RTO digit if it looks like a digit
             if len(rest) > 1 and rest[1] in self.STRICT_DIGIT_LIKES:
                 rto_len = 2
+            else:
+                # Can't form a valid 2-digit RTO → fail this parse
+                return None
         
         # ── Fix RTO digits ──
         rto_chars = list(rest[:rto_len])
