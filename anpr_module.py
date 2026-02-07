@@ -1,4 +1,78 @@
-import cv2
+Detailed Results
+
+🖼️ Gallery View
+
+
+📊 Table View
+
+
+📄 Export Data
+
+Vehicle #1 - 4W - DL3CCA1750
+
+📸 Number Plate
+
+
+0
+🚗 Vehicle Info
+
+Type: 4W
+
+Class: car
+
+Confidence: 97.43%
+
+🔤 OCR Results
+
+✅ DL3CCA1750
+
+Raw OCR: DL3CCA1750
+
+Plate Conf: 78.57%
+
+Vehicle #2 - 4W - UNREADABLE
+
+📸 Number Plate
+
+
+0
+🚗 Vehicle Info
+
+Type: 4W
+
+Class: car
+
+Confidence: 97.43%
+
+🔤 OCR Results
+
+❌ UNREADABLE
+
+Raw OCR: UNREADABLE
+
+Plate Conf: 46.13%
+
+Vehicle #3 - 4W - UP32CR0423
+
+📸 Number Plate
+
+
+0
+🚗 Vehicle Info
+
+Type: 4W
+
+Class: car
+
+Confidence: 97.32%
+
+🔤 OCR Results
+
+✅ UP32CR0423
+
+Raw OCR: UP32CRO423
+
+Plate Conf: 74.71%import cv2
 import numpy as np
 import re
 import os
@@ -190,21 +264,32 @@ class ANPRDetector:
         if bh_candidate:
             return bh_candidate
         
-        # ── 2. TRY DIRECT STATE CODE MATCH ──
-        raw = self._fix_state_code(raw)
-        raw = self._find_state_offset(raw)
+        # ── 2. TRY ALL POSSIBLE STATE CODE INTERPRETATIONS ──
+        # First try scanning for a state code offset in the raw string
+        raw_offset = self._find_state_offset(raw)
         
-        # ── 3. VALIDATE WE HAVE A STATE CODE ──
-        if len(raw) < 5 or raw[:2] not in self.ALL_STATE_CODES:
-            return "INVALID"
+        # Get all possible state code fixes
+        candidates_raw = self._fix_state_codes(raw_offset)
         
-        state = raw[:2]
-        rest = raw[2:]
+        # Also try fixing before offset scanning
+        if raw != raw_offset:
+            candidates_raw.extend(self._fix_state_codes(raw))
         
-        # ── 4. PARSE THE REST: RTO + series + number ──
-        candidate = self._parse_plate_body(state, rest)
-        if candidate:
-            return candidate
+        # ── 3. TRY EACH INTERPRETATION AND PICK THE BEST ──
+        all_candidates = []
+        for fixed_raw in candidates_raw:
+            if len(fixed_raw) < 5 or fixed_raw[:2] not in self.ALL_STATE_CODES:
+                continue
+            state = fixed_raw[:2]
+            rest = fixed_raw[2:]
+            candidate = self._parse_plate_body(state, rest)
+            if candidate:
+                all_candidates.append(candidate)
+        
+        if all_candidates:
+            if len(all_candidates) == 1:
+                return all_candidates[0]
+            return max(all_candidates, key=lambda c: self._plate_score(c))
         
         return "INVALID"
     
@@ -229,15 +314,28 @@ class ANPRDetector:
                     return candidate
         return None
     
-    def _fix_state_code(self, raw):
-        """Apply known OCR misread fixes for the first 2 characters."""
+    def _fix_state_codes(self, raw):
+        """
+        Return a list of ALL possible state code interpretations
+        for the first 2 characters, ordered by confidence.
+        Each entry is the full raw string with state code fixed.
+        """
         prefix = raw[:2]
+        
+        # Direct match — highest confidence
         if prefix in self.ALL_STATE_CODES:
-            return raw
-        # Check the explicit fix table
+            return [raw]
+        
+        results = []
+        seen = set()
+        
+        # Check the explicit fix table first (most reliable)
         if prefix in self.STATE_OCR_FIXES:
-            return self.STATE_OCR_FIXES[prefix] + raw[2:]
-        # Try digit→letter substitution on first 2 chars to recover a state code
+            fixed = self.STATE_OCR_FIXES[prefix]
+            results.append(fixed + raw[2:])
+            seen.add(fixed)
+        
+        # Try digit→letter substitution on first 2 chars
         c0_options = [raw[0]]
         c1_options = [raw[1]]
         if raw[0] in self.DIGIT_TO_LETTER:
@@ -249,6 +347,7 @@ class ANPRDetector:
             c0_options.append('D')
         if raw[1] == '0':
             c1_options.append('D')
+            c1_options.append('L')  # 0 can also look like L
         # Also try letter→different letter for common confusions
         extra_letter_map = {
             'X': 'K', 'N': 'H', 'H': 'N', 'W': 'M',
@@ -262,9 +361,11 @@ class ANPRDetector:
         for c0 in c0_options:
             for c1 in c1_options:
                 code = c0 + c1
-                if code in self.ALL_STATE_CODES and code != prefix:
-                    return code + raw[2:]
-        return raw
+                if code in self.ALL_STATE_CODES and code != prefix and code not in seen:
+                    results.append(code + raw[2:])
+                    seen.add(code)
+        
+        return results if results else [raw]
     
     def _find_state_offset(self, raw):
         """
@@ -419,12 +520,23 @@ class ANPRDetector:
         series_chars = list(series_raw)
         for i in range(len(series_chars)):
             ch = series_chars[i]
-            if ch == 'O':
-                series_chars[i] = '0'   # O prohibited in series
-            elif ch == 'I':
-                series_chars[i] = '1'   # I prohibited in series
-            elif ch in self.DIGIT_TO_LETTER:
-                series_chars[i] = self.DIGIT_TO_LETTER[ch]
+            if ch.isdigit():
+                # Digit in series position → convert to letter
+                replacement = self.DIGIT_TO_LETTER.get(ch, ch)
+                if replacement in ('O', 'I'):
+                    # O and I are prohibited in series — this digit
+                    # can't be meaningfully converted to a valid series letter.
+                    # Mark series as invalid.
+                    series_chars = None
+                    break
+                series_chars[i] = replacement
+            elif ch == 'O' or ch == 'I':
+                # O/I are prohibited in series — invalid
+                series_chars = None
+                break
+        
+        if series_chars is None:
+            return None  # Prohibited O/I in series
         
         series = ''.join(series_chars)
         
@@ -477,8 +589,12 @@ class ANPRDetector:
                 series_chars = []
                 valid_series = True
                 for ch in series_raw:
-                    if ch in self.DIGIT_TO_LETTER:
-                        series_chars.append(self.DIGIT_TO_LETTER[ch])
+                    if ch.isdigit():
+                        replacement = self.DIGIT_TO_LETTER.get(ch, ch)
+                        if replacement in ('O', 'I'):
+                            valid_series = False
+                            break
+                        series_chars.append(replacement)
                     elif ch.isalpha() and ch not in ('O', 'I'):
                         series_chars.append(ch)
                     else:

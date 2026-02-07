@@ -487,7 +487,7 @@ def _video_analysis_ui(vehicle_conf, plate_conf):
             cols = st.columns(min(3, len(sample_frames)))
             for i, (frame_rgb, _) in enumerate(sample_frames[:6]):
                 with cols[i % 3]:
-                    st.image(frame_rgb, caption=f"Sample {i+1}", use_container_width=True)
+                    st.image(frame_rgb, caption=f"Sample {i+1}", use_column_width=True)
         
         # ── Detailed results (reuse shared widget) ──
         if results:
